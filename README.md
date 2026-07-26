@@ -333,7 +333,13 @@ uv run python -m torq.ingest.manuals
 uv run python -m torq.ingest.history
 ```
 
-On first use, FastEmbed may download the configured embedding, sparse, and reranking models. Ingestion recreates each Qdrant collection from the source files.
+On first use, FastEmbed may download the configured embedding, sparse, and reranking models. Ingestion upserts each Qdrant collection in place and prunes records no longer in the source, so a collection is never emptied mid-update.
+
+Two collections back the engine: `torq_manuals` (OEM guidance) and `torq_history` (past repairs), each carrying dense + BM25 named vectors.
+
+<div align="center">
+  <img src="assets/torq-history.png" alt="torq_history collection in the Qdrant dashboard" width="820">
+</div>
 
 ## API
 

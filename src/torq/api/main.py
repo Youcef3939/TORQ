@@ -23,6 +23,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     live.loop = asyncio.get_running_loop()
 
     models.init_db()
+
+    # Prime the MCP session in the background so its one-time model cold-load
+    # happens at boot, not on the first diagnosis. Non-blocking: the app serves
+    # immediately; retrieval falls back to direct until the session is warm.
+    if settings.mcp_warmup_on_start:
+        import threading
+
+        from torq.mcp.client import mcp_available, mcp_warmup
+
+        if mcp_available():
+            threading.Thread(target=mcp_warmup, name="mcp-warmup", daemon=True).start()
+            print("[MCP] warming knowledge session in background")
+
     mqtt_client = None
     if settings.enable_fallbacks:
         print("[MQTT] fallbacks enabled, skipping broker connection")
@@ -42,6 +55,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             mqtt_client = None
             live.mqtt_client = None
     yield
+    from torq.mcp.client import mcp_shutdown
+
+    mcp_shutdown()
     if mqtt_client:
         mqtt_client.loop_stop()
         mqtt_client.disconnect()

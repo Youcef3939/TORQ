@@ -103,20 +103,15 @@ def _doc_id_for(payload: dict, fallback: int) -> str | int:
     return fallback
 
 
-def index_docs(collection: str, docs: list[str], payloads: list[dict]) -> int:
-    """(Re)create a collection with dense + sparse vectors and index the docs."""
-    if not docs:
-        return 0
-    client = get_client()
-    dense = embed(docs)
-    sparse = [_sparse(d) for d in docs]
-
+def _ensure_collection(client: QdrantClient, collection: str, dim: int) -> None:
+    """Create the collection (dense + BM25 named vectors) and payload indexes if
+    it does not already exist. No-op when it exists."""
     if client.collection_exists(collection):
-        client.delete_collection(collection)
+        return
     client.create_collection(
         collection_name=collection,
         vectors_config={
-            "dense": models.VectorParams(size=len(dense[0]), distance=models.Distance.COSINE)
+            "dense": models.VectorParams(size=dim, distance=models.Distance.COSINE)
         },
         sparse_vectors_config={"bm25": models.SparseVectorParams(modifier=models.Modifier.IDF)},
     )
@@ -126,18 +121,68 @@ def index_docs(collection: str, docs: list[str], payloads: list[dict]) -> int:
         except Exception:  # noqa: BLE001 - index is an optimization, not required
             pass
 
+
+def _all_point_ids(client: QdrantClient, collection: str) -> list:
+    """Every point id in the collection (paginated scroll, ids only)."""
+    ids, offset = [], None
+    while True:
+        pts, offset = client.scroll(
+            collection_name=collection,
+            with_payload=False,
+            with_vectors=False,
+            limit=256,
+            offset=offset,
+        )
+        ids.extend(p.id for p in pts)
+        if offset is None:
+            return ids
+
+
+def index_docs(
+    collection: str, docs: list[str], payloads: list[dict], *, rebuild: bool = False
+) -> int:
+    """Index docs into a collection (created if missing).
+
+    Upserts by stable id and prunes points that are no longer present, so the
+    collection is never emptied mid-update: a drop+recreate would leave it briefly
+    empty, and on a networked store a concurrent search would then return nothing.
+    Pass ``rebuild=True`` to force a clean recreate (e.g. after an embedding-model
+    change alters the vector dimension)."""
+    if not docs:
+        return 0
+    client = get_client()
+    dense = embed(docs)
+    sparse = [_sparse(d) for d in docs]
+    ids = [_point_id(_doc_id_for(payloads[i], i)) for i in range(len(docs))]
+
+    if rebuild and client.collection_exists(collection):
+        client.delete_collection(collection)
+    _ensure_collection(client, collection, len(dense[0]))
+
     now = datetime.now(timezone.utc).isoformat()
-    client.upsert(
-        collection_name=collection,
-        points=[
-            models.PointStruct(
-                id=_point_id(_doc_id_for(payloads[i], i)),
-                vector={"dense": dense[i], "bm25": sparse[i]},
-                payload={**payloads[i], "document": docs[i], "indexed_at": now},
-            )
-            for i in range(len(docs))
-        ],
-    )
+    points = [
+        models.PointStruct(
+            id=ids[i],
+            vector={"dense": dense[i], "bm25": sparse[i]},
+            payload={**payloads[i], "document": docs[i], "indexed_at": now},
+        )
+        for i in range(len(docs))
+    ]
+    try:
+        client.upsert(collection_name=collection, points=points)
+    except Exception:  # noqa: BLE001 - schema/dimension mismatch: clean recreate, retry
+        client.delete_collection(collection)
+        _ensure_collection(client, collection, len(dense[0]))
+        client.upsert(collection_name=collection, points=points)
+        return len(docs)  # fresh collection, nothing to prune
+
+    keep = set(ids)
+    stale = [pid for pid in _all_point_ids(client, collection) if pid not in keep]
+    if stale:
+        client.delete(
+            collection_name=collection,
+            points_selector=models.PointIdsList(points=stale),
+        )
     return len(docs)
 
 

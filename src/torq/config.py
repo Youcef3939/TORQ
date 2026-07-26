@@ -127,6 +127,12 @@ class Settings(BaseSettings):
     # `uv run`, so each short-lived session does not re-resolve the environment.
     mcp_server_command: str = sys.executable
     mcp_server_args: list[str] = ["-m", "torq.mcp.server"]
+    # One long-lived MCP session is reused across calls: the server subprocess
+    # cold-loads its embedding models once (~200s) then stays warm. The first call
+    # pays that cost, so the timeout is generous; warmup runs it at startup off the
+    # request path.
+    mcp_call_timeout: int = 300  # seconds; first call cold-loads models
+    mcp_warmup_on_start: bool = True  # prime the session at app boot
 
 
 settings = Settings()
